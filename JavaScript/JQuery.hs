@@ -189,14 +189,14 @@ module JavaScript.JQuery ( JQuery(..)
 import           Prelude hiding (filter, not, empty, last)
 
 import           GHCJS.Marshal
-import           GHCJS.Foreign ( ToJSString(..), FromJSString(..), newObj
-                               , toJSBool, jsNull, jsFalse, jsTrue, mvarRef
-                               )
+import           GHCJS.Foreign (toJSBool, jsNull, jsFalse, jsTrue)
 import           GHCJS.Types
-import           GHCJS.DOM.Types (Element(..), IsElement(..), toElement
-                                 , unElement)
+import           GHCJS.DOM.Types ( ToJSString(..), FromJSString(..), toJSString, fromJSString
+                                 , Element(..), IsElement(..), toElement, unElement)
 import qualified GHCJS.Foreign as F
-
+import qualified GHCJS.Foreign.Callback as F
+import           GHCJS.Nullable
+import qualified JavaScript.Object as F
 import           JavaScript.JQuery.Internal
 
 import           Control.Applicative hiding (empty)
@@ -208,6 +208,7 @@ import           Data.Default
 import           Data.Maybe
 import           Data.Text (Text)
 import           Data.Typeable
+import           Data.Coerce
 
 import           System.IO (fixIO)
 
@@ -231,8 +232,8 @@ instance Default AjaxSettings where
 
 instance ToJSRef AjaxSettings where
   toJSRef (AjaxSettings ct cache ifMod method) = do
-    o <- newObj
-    let (.=) :: Text -> JSRef a -> IO ()
+    o <- F.create
+    let (.=) :: Text -> JSRef -> IO ()
         p .= v = F.setProp p v o
     "method"      .= toJSString method
     "ifModified"  .= toJSBool ifMod
@@ -241,15 +242,17 @@ instance ToJSRef AjaxSettings where
     "dataType"    .= ("text" :: JSString)
     return o
 
-instance ToJSString Method where
-  toJSString GET    = "GET"
-  toJSString POST   = "POST"
-  toJSString PUT    = "PUT"
-  toJSString DELETE = "DELETE"
+instance ToJSString Method
+instance ToJSRef Method where
+  toJSRef m = (toJSRef :: JSString -> JSRef) $ case m of
+    GET    -> "GET"
+    POST   -> "POST"
+    PUT    -> "PUT"
+    DELETE -> "DELETE"
 
 ajax :: Text -> [(Text,Text)] -> AjaxSettings -> IO AjaxResult
 ajax url d s = do
-  o <- newObj
+  o <- F.create
   forM_ d (\(k,v) -> F.setProp k (toJSString v) o)
   os <- toJSRef s
   F.setProp ("data"::Text) o os
@@ -264,10 +267,10 @@ data HandlerSettings = HandlerSettings { hsPreventDefault           :: Bool
                                        , hsStopImmediatePropagation :: Bool
                                        , hsSynchronous              :: Bool
                                        , hsDescendantFilter         :: Maybe Selector
-                                       , hsHandlerData              :: Maybe (JSRef ())
+                                       , hsHandlerData              :: Maybe JSRef
                                        }
 
-convertHandlerSettings :: HandlerSettings -> (Bool, Bool, Bool, JSString, JSRef ())
+convertHandlerSettings :: HandlerSettings -> (Bool, Bool, Bool, JSString, JSRef)
 convertHandlerSettings (HandlerSettings pd sp sip _ ds hd) =
   (pd, sp, sip, maybe jsNull toJSString ds, fromMaybe jsNull hd)
 
@@ -277,7 +280,7 @@ instance Default HandlerSettings where
 addClass :: Text -> JQuery -> IO JQuery
 addClass c = jq_addClass (toJSString c)
 
-animate :: JSObject a -> JSObject b -> JQuery -> IO JQuery
+animate :: F.Object -> F.Object -> JQuery -> IO JQuery
 animate = jq_animate
 
 getAttr :: Text -> JQuery -> IO Text
@@ -332,8 +335,8 @@ holdReady b = jq_holdReady b
 selectElement :: IsElement e => e -> IO JQuery
 selectElement e = jq_selectElement (unElement (toElement e))
 
-selectObject :: JSObject a -> IO JQuery
-selectObject a = jq_selectObject (castRef a)
+selectObject :: F.Object -> IO JQuery
+selectObject a = jq_selectObject (coerce a)
 
 select :: Text -> IO JQuery
 select q = jq_select (toJSString q)
@@ -341,9 +344,9 @@ select q = jq_select (toJSString q)
 selectEmpty :: IO JQuery
 selectEmpty = jq_selectEmpty
 
--- :: Text -> Either JQuery JSObject -> IO JQuery ?
-selectWithContext :: Text -> JSObject a -> IO JQuery
-selectWithContext t o = jq_selectWithContext (toJSString t) (castRef o)
+-- :: Text -> Either JQuery F.Object -> IO JQuery ?
+selectWithContext :: Text -> F.Object -> IO JQuery
+selectWithContext t o = jq_selectWithContext (toJSString t) (coerce o)
 
 getCss :: Text -> JQuery -> IO Text
 getCss t jq = fromJSString <$> jq_getCss (toJSString t) jq
@@ -436,10 +439,10 @@ mouseup a = on a "mouseup"
 on :: (Event -> IO ()) -> EventType -> HandlerSettings -> JQuery -> IO (IO ())
 on a et hs jq = do
   cb <- if hsSynchronous hs
-          then F.syncCallback1 F.AlwaysRetain True a
-          else F.asyncCallback1 F.AlwaysRetain a
+          then F.syncCallback1 F.ContinueAsync a
+          else F.asyncCallback1 a
   jq_on cb et' ds hd sp sip pd jq
-  return (jq_off cb et' ds jq >> F.release cb)
+  return (jq_off cb et' ds jq >> F.releaseCallback cb)
     where
       et'                   = toJSString et
       (pd, sp, sip, ds, hd) = convertHandlerSettings hs
@@ -447,12 +450,12 @@ on a et hs jq = do
 one :: (Event -> IO ()) -> EventType -> HandlerSettings -> JQuery -> IO (IO ())
 one a et hs jq = do
   cb <- fixIO $ \cb ->
-      let a' = \e -> F.release cb >> a e
+      let a' = \e -> F.releaseCallback cb >> a e
       in if hsSynchronous hs
-            then F.syncCallback1 F.AlwaysRetain True a
-            else F.asyncCallback1 F.AlwaysRetain a
+            then F.syncCallback1 F.ContinueAsync a
+            else F.asyncCallback1 a
   jq_one cb et' ds hd sp sip pd jq
-  return (jq_off cb et' ds jq >> F.release cb)
+  return (jq_off cb et' ds jq >> F.releaseCallback cb)
     where
       et'                   = toJSString et
       (pd, sp, sip, ds, hd) = convertHandlerSettings hs
@@ -533,40 +536,40 @@ keypress :: (Event -> IO ()) -> HandlerSettings -> JQuery -> IO (IO ())
 keypress a = on a "keypress"
 
 after :: Text -> JQuery -> IO JQuery
-after h jq = jq_after (castRef $ toJSString h) jq
+after h jq = jq_after (coerce $ toJSString h) jq
 
 afterJQuery :: JQuery -> JQuery -> IO JQuery
-afterJQuery j jq = jq_after (castRef j) jq
+afterJQuery j jq = jq_after (coerce j) jq
 
 afterElem :: IsElement e => e -> JQuery -> IO JQuery
-afterElem e jq = jq_after (castRef . unElement $ toElement e) jq
+afterElem e jq = jq_after (coerce . unElement $ toElement e) jq
 
 append :: Text -> JQuery -> IO JQuery
-append h jq = jq_append (castRef $ toJSString h) jq
+append h jq = jq_append (coerce $ toJSString h) jq
 
 appendJQuery :: JQuery -> JQuery -> IO JQuery
-appendJQuery j jq = jq_append (castRef j) jq
+appendJQuery j jq = jq_append (coerce j) jq
 
 appendElem :: IsElement e => e -> JQuery -> IO JQuery
-appendElem e jq = jq_append (castRef . unElement $ toElement e) jq
+appendElem e jq = jq_append (coerce . unElement $ toElement e) jq
 
 appendTo :: Text -> JQuery -> IO JQuery
-appendTo h jq = jq_appendTo (castRef $ toJSString h) jq
+appendTo h jq = jq_appendTo (coerce $ toJSString h) jq
 
 appendToJQuery :: JQuery -> JQuery -> IO JQuery
-appendToJQuery j jq = jq_appendTo (castRef j) jq
+appendToJQuery j jq = jq_appendTo (coerce j) jq
 
 appendToElem :: IsElement e => e -> JQuery -> IO JQuery
-appendToElem e jq = jq_appendTo (castRef . unElement $ toElement e) jq
+appendToElem e jq = jq_appendTo (coerce . unElement $ toElement e) jq
 
 before :: Text -> JQuery -> IO JQuery
-before h jq = jq_before (castRef $ toJSString h) jq
+before h jq = jq_before (coerce $ toJSString h) jq
 
 beforeJQuery :: JQuery -> JQuery -> IO JQuery
-beforeJQuery j jq = jq_before (castRef j) jq
+beforeJQuery j jq = jq_before (coerce j) jq
 
 beforeElem :: IsElement e => e -> JQuery -> IO JQuery
-beforeElem e jq = jq_before (castRef . unElement $ toElement e) jq
+beforeElem e jq = jq_before (coerce . unElement $ toElement e) jq
 
 data CloneType = WithoutDataAndEvents
                | WithDataAndEvents
@@ -587,40 +590,40 @@ empty :: JQuery -> IO JQuery
 empty = jq_empty
 
 insertAfter :: Text -> JQuery -> IO JQuery
-insertAfter h jq = jq_insertAfter (castRef $ toJSString h) jq
+insertAfter h jq = jq_insertAfter (coerce $ toJSString h) jq
 
 insertAfterJQuery :: JQuery -> JQuery -> IO JQuery
-insertAfterJQuery j jq = jq_insertAfter (castRef j) jq
+insertAfterJQuery j jq = jq_insertAfter (coerce j) jq
 
 insertAfterElem :: IsElement e => e -> JQuery -> IO JQuery
-insertAfterElem e jq = jq_insertAfter (castRef . unElement $ toElement e) jq
+insertAfterElem e jq = jq_insertAfter (coerce . unElement $ toElement e) jq
 
 insertBefore :: Text -> JQuery -> IO JQuery
-insertBefore h jq = jq_insertBefore (castRef $ toJSString h) jq
+insertBefore h jq = jq_insertBefore (coerce $ toJSString h) jq
 
 insertBeforeJQuery :: JQuery -> JQuery -> IO JQuery
-insertBeforeJQuery j jq = jq_insertBefore (castRef j) jq
+insertBeforeJQuery j jq = jq_insertBefore (coerce j) jq
 
 insertBeforeElem :: IsElement e => e -> JQuery -> IO JQuery
-insertBeforeElem e jq = jq_insertBefore (castRef . unElement $ toElement e) jq
+insertBeforeElem e jq = jq_insertBefore (coerce . unElement $ toElement e) jq
 
 prepend :: Text -> JQuery -> IO JQuery
-prepend h jq = jq_prepend (castRef $ toJSString h) jq
+prepend h jq = jq_prepend (coerce $ toJSString h) jq
 
 prependJQuery :: JQuery -> JQuery -> IO JQuery
-prependJQuery j jq = jq_prepend (castRef j) jq
+prependJQuery j jq = jq_prepend (coerce j) jq
 
 prependElem :: IsElement e => e -> JQuery -> IO JQuery
-prependElem e jq = jq_prepend (castRef . unElement $ toElement e) jq
+prependElem e jq = jq_prepend (coerce . unElement $ toElement e) jq
 
 prependTo :: Text -> JQuery -> IO JQuery
-prependTo h jq = jq_prependTo (castRef $ toJSString h) jq
+prependTo h jq = jq_prependTo (coerce $ toJSString h) jq
 
 prependToJQuery :: JQuery -> JQuery -> IO JQuery
-prependToJQuery j jq = jq_prependTo (castRef j) jq
+prependToJQuery j jq = jq_prependTo (coerce j) jq
 
 prependToElem :: IsElement e => e -> JQuery -> IO JQuery
-prependToElem e jq = jq_prependTo (castRef . unElement $ toElement e) jq
+prependToElem e jq = jq_prependTo (coerce . unElement $ toElement e) jq
 
 remove :: JQuery -> IO JQuery
 remove = jq_remove jsNull
@@ -629,64 +632,64 @@ removeSelector :: Selector -> JQuery -> IO JQuery
 removeSelector s = jq_remove (toJSString s)
 
 replaceAll :: Text -> JQuery -> IO JQuery
-replaceAll h jq = jq_replaceAll (castRef $ toJSString h) jq
+replaceAll h jq = jq_replaceAll (coerce $ toJSString h) jq
 
 replaceAllJQuery :: JQuery -> JQuery -> IO JQuery
-replaceAllJQuery j jq = jq_replaceAll (castRef j) jq
+replaceAllJQuery j jq = jq_replaceAll (coerce j) jq
 
 replaceAllElem :: IsElement e => e -> JQuery -> IO JQuery
-replaceAllElem e jq = jq_replaceAll (castRef . unElement $ toElement e) jq
+replaceAllElem e jq = jq_replaceAll (coerce . unElement $ toElement e) jq
 
 replaceWith :: Text -> JQuery -> IO JQuery
-replaceWith h jq = jq_replaceWith (castRef $ toJSString h) jq
+replaceWith h jq = jq_replaceWith (coerce $ toJSString h) jq
 
 replaceWithJQuery :: JQuery -> JQuery -> IO JQuery
-replaceWithJQuery j jq = jq_replaceWith (castRef j) jq
+replaceWithJQuery j jq = jq_replaceWith (coerce j) jq
 
 replaceWithElem :: IsElement e => e -> JQuery -> IO JQuery
-replaceWithElem e jq = jq_replaceWith (castRef . unElement $ toElement e) jq
+replaceWithElem e jq = jq_replaceWith (coerce . unElement $ toElement e) jq
 
 unwrap :: JQuery -> IO JQuery
 unwrap = jq_unwrap
 
 wrap :: Text -> JQuery -> IO JQuery
-wrap h jq = jq_wrap (castRef $ toJSString h) jq
+wrap h jq = jq_wrap (coerce $ toJSString h) jq
 
 wrapJQuery :: JQuery -> JQuery -> IO JQuery
-wrapJQuery j jq = jq_wrap (castRef j) jq
+wrapJQuery j jq = jq_wrap (coerce j) jq
 
 wrapElem :: IsElement e => e -> JQuery -> IO JQuery
-wrapElem e jq = jq_wrap (castRef . unElement $ toElement e) jq
+wrapElem e jq = jq_wrap (coerce . unElement $ toElement e) jq
 
 wrapAll :: Text -> JQuery -> IO JQuery
-wrapAll h jq = jq_wrapAll (castRef $ toJSString h) jq
+wrapAll h jq = jq_wrapAll (coerce $ toJSString h) jq
 
 wrapAllJQuery :: JQuery -> JQuery -> IO JQuery
-wrapAllJQuery j jq = jq_wrapAll (castRef j) jq
+wrapAllJQuery j jq = jq_wrapAll (coerce j) jq
 
 wrapAllElem :: IsElement e => e -> JQuery -> IO JQuery
-wrapAllElem e jq = jq_wrapAll (castRef . unElement $ toElement e) jq
+wrapAllElem e jq = jq_wrapAll (coerce . unElement $ toElement e) jq
 
 wrapInner :: Text -> JQuery -> IO JQuery
-wrapInner h jq = jq_wrapInner (castRef $ toJSString h) jq
+wrapInner h jq = jq_wrapInner (coerce $ toJSString h) jq
 
 wrapInnerJQuery :: JQuery -> JQuery -> IO JQuery
-wrapInnerJQuery j jq = jq_wrapInner (castRef j) jq
+wrapInnerJQuery j jq = jq_wrapInner (coerce j) jq
 
 wrapInnerElem :: IsElement e => e -> JQuery -> IO JQuery
-wrapInnerElem e jq = jq_wrapInner (castRef . unElement $ toElement e) jq
+wrapInnerElem e jq = jq_wrapInner (coerce . unElement $ toElement e) jq
 
 addSelector :: Selector -> JQuery -> IO JQuery
-addSelector s jq = jq_add (castRef $ toJSString s) jq
+addSelector s jq = jq_add (coerce $ toJSString s) jq
 
 addElement :: IsElement e => e -> JQuery -> IO JQuery
-addElement e jq = jq_add (castRef . unElement $ toElement e) jq
+addElement e jq = jq_add (coerce . unElement $ toElement e) jq
 
 addHtml :: Text -> JQuery -> IO JQuery
-addHtml h jq = jq_add (castRef $ toJSString h) jq
+addHtml h jq = jq_add (coerce $ toJSString h) jq
 
 add :: JQuery -> JQuery -> IO JQuery
-add j jq = jq_add (castRef j) jq
+add j jq = jq_add (coerce j) jq
 
 -- addSelectorWithContext :: Selector -> JQuery -> JQuery -> IO JQuery
 -- addSelectorWithContext = undefined
@@ -701,16 +704,16 @@ childrenMatching :: Selector -> JQuery -> IO JQuery
 childrenMatching s = jq_children (toJSString s)
 
 closestSelector :: Selector -> JQuery -> IO JQuery
-closestSelector s jq = jq_closest (castRef $ toJSString s) jq
+closestSelector s jq = jq_closest (coerce $ toJSString s) jq
 
 -- closestWithContext :: Selector -> Selector -> JQuery -> IO JQuery
 -- closestWithContext = undefined
 
 closest :: JQuery -> JQuery -> IO JQuery
-closest j jq = jq_closest (castRef j) jq
+closest j jq = jq_closest (coerce j) jq
 
 closestElement :: IsElement e => e -> JQuery -> IO JQuery
-closestElement e jq = jq_closest (castRef . unElement $ toElement e) jq
+closestElement e jq = jq_closest (coerce . unElement $ toElement e) jq
 
 contents :: JQuery -> IO JQuery
 contents = jq_contents
@@ -726,40 +729,40 @@ eq :: Int -> JQuery -> IO JQuery
 eq = jq_eq
 
 filter :: Selector -> JQuery -> IO JQuery
-filter s = jq_filter (castRef $ toJSString s)
+filter s = jq_filter (coerce $ toJSString s)
 
 filterElement :: IsElement e => e -> JQuery -> IO JQuery
-filterElement e = jq_filter (castRef . unElement $ toElement e)
+filterElement e = jq_filter (coerce . unElement $ toElement e)
 
 filterJQuery :: JQuery -> JQuery -> IO JQuery
-filterJQuery j = jq_filter (castRef j)
+filterJQuery j = jq_filter (coerce j)
 
 find :: Selector -> JQuery -> IO JQuery
-find s = jq_find (castRef $ toJSString s)
+find s = jq_find (coerce $ toJSString s)
 
 findJQuery :: JQuery -> JQuery -> IO JQuery
-findJQuery j = jq_find (castRef j)
+findJQuery j = jq_find (coerce j)
 
 findElement :: IsElement e => e -> JQuery -> IO JQuery
-findElement e = jq_find (castRef . unElement $ toElement e)
+findElement e = jq_find (coerce . unElement $ toElement e)
 
 first :: JQuery -> IO JQuery
 first = jq_first
 
 has :: Selector -> JQuery -> IO JQuery
-has s = jq_has (castRef $ toJSString s)
+has s = jq_has (coerce $ toJSString s)
 
 hasElement :: IsElement e => e -> JQuery -> IO JQuery
-hasElement e = jq_has (castRef . unElement $ toElement e)
+hasElement e = jq_has (coerce . unElement $ toElement e)
 
 is :: Selector -> JQuery -> IO Bool
-is s = jq_is (castRef $ toJSString s)
+is s = jq_is (coerce $ toJSString s)
 
 isJQuery :: JQuery -> JQuery -> IO Bool
-isJQuery j = jq_is (castRef j)
+isJQuery j = jq_is (coerce j)
 
 isElement :: IsElement e => e -> JQuery -> IO Bool
-isElement e = jq_is (castRef . unElement $ toElement e)
+isElement e = jq_is (coerce . unElement $ toElement e)
 
 last :: JQuery -> IO JQuery
 last = jq_last
@@ -777,22 +780,22 @@ nextAllSelector :: Selector -> JQuery -> IO JQuery
 nextAllSelector s = jq_nextAll (toJSString s)
 
 nextUntil :: Selector -> Maybe Selector -> JQuery -> IO JQuery
-nextUntil s mf = jq_nextUntil (castRef $ toJSString s) (maybe jsNull toJSString mf)
+nextUntil s mf = jq_nextUntil (coerce $ toJSString s) (maybe jsNull toJSString mf)
 
 nextUntilElement :: IsElement e => e -> Maybe Selector -> JQuery -> IO JQuery
-nextUntilElement e mf = jq_nextUntil (castRef . unElement $ toElement e) (maybe jsNull toJSString mf)
+nextUntilElement e mf = jq_nextUntil (coerce . unElement $ toElement e) (maybe jsNull toJSString mf)
 
 not :: Selector -> JQuery -> IO JQuery
-not s = jq_not (castRef $ toJSString s)
+not s = jq_not (coerce $ toJSString s)
 
 notElement :: IsElement e => e -> JQuery -> IO JQuery
-notElement e = jq_not (castRef . unElement $ toElement e)
+notElement e = jq_not (coerce . unElement $ toElement e)
 
 -- notElements :: [Element] -> JQuery -> IO JQuery
 -- notElements = jq_notElements
 
 notJQuery :: JQuery -> JQuery -> IO JQuery
-notJQuery j = jq_not (castRef j)
+notJQuery j = jq_not (coerce j)
 
 offsetParent :: JQuery -> IO JQuery
 offsetParent = jq_offsetParent
@@ -810,10 +813,10 @@ parentsSelector :: Selector -> JQuery -> IO JQuery
 parentsSelector s = jq_parents (toJSString s)
 
 parentsUntil :: Selector -> Maybe Selector -> JQuery -> IO JQuery
-parentsUntil s mf = jq_parentsUntil (castRef $ toJSString s) (maybe jsNull (castRef . toJSString) mf)
+parentsUntil s mf = jq_parentsUntil (coerce $ toJSString s) (maybe jsNull (coerce . toJSString) mf)
 
 parentsUntilElement :: IsElement e => e -> Maybe Selector -> JQuery -> IO JQuery
-parentsUntilElement e mf = jq_parentsUntil (castRef . unElement $ toElement e) (maybe jsNull (castRef . toJSString) mf)
+parentsUntilElement e mf = jq_parentsUntil (coerce . unElement $ toElement e) (maybe jsNull (coerce . toJSString) mf)
 
 prev :: JQuery -> IO JQuery
 prev = jq_prev jsNull
@@ -828,16 +831,16 @@ prevAllSelector :: String -> JQuery -> IO JQuery
 prevAllSelector s = jq_prevAll (toJSString s)
 
 prevUntil :: Selector -> Maybe Selector -> JQuery -> IO JQuery
-prevUntil s mf = jq_prevUntil (castRef $ toJSString s) (maybe jsNull toJSString mf)
+prevUntil s mf = jq_prevUntil (coerce $ toJSString s) (maybe jsNull toJSString mf)
 
 prevUntilElement :: IsElement e => e -> Maybe Selector -> JQuery -> IO JQuery
-prevUntilElement e mf = jq_prevUntil (castRef . unElement $ toElement e) (maybe jsNull toJSString mf)
+prevUntilElement e mf = jq_prevUntil (coerce . unElement $ toElement e) (maybe jsNull toJSString mf)
 
 siblings :: JQuery -> IO JQuery
-siblings = jq_siblings jsNull
+siblings = jq_siblings (maybeToNullable Nothing)
 
 siblingsSelector :: Selector -> JQuery -> IO JQuery
-siblingsSelector s = jq_siblings (toJSString s)
+siblingsSelector s = jq_siblings (maybeToNullable (Just (toJSString s)))
 
 slice :: Int -> JQuery -> IO JQuery
 slice = jq_slice
